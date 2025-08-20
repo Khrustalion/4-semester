@@ -1,0 +1,279 @@
+x-etcd-env: &etcd_env
+  ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+  ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+  ETCD_INITIAL_CLUSTER: etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+  ETCD_INITIAL_CLUSTER_STATE: new
+  ETCD_INITIAL_CLUSTER_TOKEN: pgcluster
+  ETCD_ENABLE_V2: "true"
+
+x-patroni-env: &patroni_env
+  PATRONI_SCOPE: wylt
+  PATRONI_NAMESPACE: /service/
+  PATRONI_ETCD_HOSTS: http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  PATRONI_SUPERUSER_USERNAME: ${POSTGRES_USER}
+  PATRONI_SUPERUSER_PASSWORD: ${POSTGRES_PASSWORD}
+  PATRONI_REPLICATION_USERNAME: replicator
+  PATRONI_REPLICATION_PASSWORD: replicator
+  PATRONI_LOG_LEVEL: INFO
+
+
+services:
+  flyway:
+    image: flyway/flyway:latest
+    depends_on:
+      init_db:
+        condition: service_completed_successfully
+    volumes:
+      - ./migrations:/flyway/sql
+    command: migrate
+    environment:
+      - FLYWAY_URL=jdbc:postgresql://haproxy:5000/${POSTGRES_DB}
+      - FLYWAY_USER=${FLYWAY_USER}
+      - FLYWAY_PASSWORD=${FLYWAY_PASSWORD}
+      - FLYWAY_TARGET=${MIGRATION_VERSION:-latest}
+      - FLYWAY_CLEAN_DISABLED=false
+    networks:
+      - backend-net
+
+  seed:
+    build:
+      context: ./seed
+    depends_on:
+      haproxy:
+        condition: service_healthy
+      flyway:
+        condition: service_completed_successfully
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      SEED_COUNT: ${SEED_COUNT:-100}
+      DB_HOST: haproxy
+      DB_PORT: 5000
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+    networks:
+      - backend-net
+    command: ["python", "main.py"]
+
+  setup_roles:
+    build:
+      context: ./seed
+    depends_on:
+      haproxy:
+        condition: service_healthy
+      flyway:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: haproxy
+      DB_PORT: 5000
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      ANALYST_NAMES: ${ANALYST_NAMES}
+    networks:
+      - backend-net
+    command: ["python", "setup_roles.py"]
+
+  app:
+    build:
+      context: ./app
+    depends_on:
+      haproxy:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_HOST: haproxy
+      POSTGRES_PORT: 5000
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "8000:8000"
+    networks:
+      - backend-net
+    command: ["python", "sim_raw.py"]
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - backend-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-secret}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - app
+    networks:
+      - backend-net
+
+  backup:
+    build:
+      context: ./backups
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./backups_data:/backups
+    depends_on:
+      haproxy:
+        condition: service_healthy
+    networks:
+      - backend-net
+
+  init_db:
+    image: postgres:16-alpine
+    container_name: init_db
+    restart: "no"
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        psql -h haproxy -p 5000 -U "$POSTGRES_USER" -d postgres -f init.sql
+    volumes:
+      - ./init.sql:/init.sql
+    depends_on:
+      haproxy:
+        condition: service_healthy
+    networks:
+      - backend-net
+
+  etcd1:
+    image: quay.io/coreos/etcd:v3.5.9
+    environment:
+      <<: *etcd_env
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd1:2379
+    command: etcd --name etcd1 --initial-advertise-peer-urls http://etcd1:2380
+    volumes:
+      - etcd1-data:/etcd-data
+    networks:
+      - backend-net
+
+  etcd2:
+    image: quay.io/coreos/etcd:v3.5.9
+    environment:
+      <<: *etcd_env
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd2:2379
+    command: etcd --name etcd2 --initial-advertise-peer-urls http://etcd2:2380
+    volumes:
+      - etcd2-data:/etcd-data
+    networks:
+      - backend-net
+
+  etcd3:
+    image: quay.io/coreos/etcd:v3.5.9
+    environment:
+      <<: *etcd_env
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd3:2379
+    command: etcd --name etcd3 --initial-advertise-peer-urls http://etcd3:2380
+    volumes:
+      - etcd3-data:/etcd-data
+    networks:
+      - backend-net
+
+  patroni1:
+    image: patroni:local
+    environment:
+      <<: *patroni_env
+      PATRONI_NAME: patroni1
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni1:5432
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+    volumes:
+      - patroni1-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8008/health"]
+    networks:
+      - backend-net
+
+  patroni2:
+    image: patroni:local
+    environment:
+      <<: *patroni_env
+      PATRONI_NAME: patroni2
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni2:5432
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+    volumes:
+      - patroni2-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8008/health"]
+    networks:
+      - backend-net
+
+  patroni3:
+    image: patroni:local
+    environment:
+      <<: *patroni_env
+      PATRONI_NAME: patroni3
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni3:5432
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+    volumes:
+      - patroni3-data:/var/lib/postgresql/data
+      - ./patroni.yml:/config/patroni.yml
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8008/health"]
+    networks:
+      - backend-net
+
+  haproxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.haproxy
+    container_name: haproxy
+    ports:
+      - "5432:5000"
+      - "5001:5001"
+      - "8008:8008"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    environment:
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -h haproxy -p 5000 -U $${PGUSER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    depends_on:
+      patroni1:
+        condition: service_healthy
+      patroni2:
+        condition: service_healthy
+      patroni3:
+        condition: service_healthy
+    networks:
+      - backend-net
+
+volumes:
+  grafana_data:
+  patroni_data1:
+  patroni_data2:
+  etcd1-data:
+  etcd2-data:
+  etcd3-data:
+  patroni1-data:
+  patroni2-data:
+  patroni3-data:
+
+networks:
+  backend-net:
+    driver: bridge

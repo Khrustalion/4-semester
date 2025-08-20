@@ -1,0 +1,142 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: [ "CMD", "rabbitmqctl", "status" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  db-pet:
+    image: postgres:15-alpine
+    container_name: db-pet
+    environment:
+      POSTGRES_DB: pets
+      POSTGRES_USER: pet
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - pet-db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U pet -d pets" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  db-owner:
+    image: postgres:15-alpine
+    container_name: db-owner
+    environment:
+      POSTGRES_DB: owners
+      POSTGRES_USER: owner
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - owner-db-data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U owner -d owners" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  db-gateway:
+    image: postgres:15-alpine
+    container_name: db-gateway
+    environment:
+      POSTGRES_DB: users
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - gateway-db-data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U gateway -d users" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pet-service:
+    build:
+      context: .
+      dockerfile: /pet-service/Dockerfile
+    container_name: pet-service
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db-pet:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db-pet:5432/pets
+      SPRING_DATASOURCE_USERNAME: pet
+      SPRING_DATASOURCE_PASSWORD: secret
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: guest
+      SPRING_RABBITMQ_PASSWORD: guest
+      SERVER_PORT: 8081
+    ports:
+      - "8081:8081"
+
+  owner-service:
+    build:
+      context: .
+      dockerfile: /owner-service/Dockerfile
+    container_name: owner-service
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db-owner:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db-owner:5432/owners
+      SPRING_DATASOURCE_USERNAME: owner
+      SPRING_DATASOURCE_PASSWORD: secret
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: guest
+      SPRING_RABBITMQ_PASSWORD: guest
+      SERVER_PORT: 8082
+    ports:
+      - "8082:8082"
+
+  web-gateway:
+    build:
+      context: .
+      dockerfile: /web-gateway/Dockerfile
+    container_name: web-gateway
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db-gateway:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db-gateway:5432/users
+      SPRING_DATASOURCE_USERNAME: gateway
+      SPRING_DATASOURCE_PASSWORD: secret
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: guest
+      SPRING_RABBITMQ_PASSWORD: guest
+      SERVER_PORT: 8080
+      JWT_SECRET: my-secret-key-which-can-be-used-in-the-context
+      JWT_EXPIRATION: 3600000
+    ports:
+      - "8080:8080"
+
+volumes:
+  pet-db-data:
+  owner-db-data:
+  gateway-db-data:

@@ -1,0 +1,35 @@
+spring:
+  datasource:
+#    url: jdbc:postgresql://db-gateway:5432/users
+    url: jdbc:postgresql://localhost:5434/users
+    username: gateway
+    password: secret
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+  rabbitmq:
+#    host: rabbit
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+
+logging:
+  level:
+    org.springframework.security: DEBUG
+    org.hibernate.SQL: DEBUG               # Показывает SQL
+    org.hibernate.type.descriptor.sql: TRACE  # Показывает параметры
+    org.springframework.jdbc.core: TRACE   # Показывает вызовы JDBC
+    org.hibernate.engine.jdbc.spi.SqlExceptionHelper: WARN  # Показывает SQL ошибки
+
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n"  # опционально: формат лога
+
+server:
+  port: 8080
+
+jwt:
+  expiration: 3600000
+  secret: my-secret-key-which-can-be-used-in-the-context
